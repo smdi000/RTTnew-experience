@@ -1,0 +1,392 @@
+#include "drv_imu_uart.h"
+#include <string.h>
+
+/*
+ * Protocol converted from the provided PC-side Python reader:
+ *
+ * Frame:
+ *   byte0      0x7E
+ *   byte1      0x23
+ *   byte2      frame length, including header/length/func/data/checksum
+ *   byte3      function code
+ *   byte4..n   payload
+ *   last byte  checksum = sum(frame[0 : len-1]) & 0xFF
+ *
+ * Supported function codes:
+ *   0x04 raw acceleration: little-endian int16 ax, ay, az; scale = 16 / 32767 g
+ *   0x26 Euler angle:      little-endian float roll, pitch, yaw; rad -> deg
+ */
+
+#define IMU_UART_THREAD_STACK_SIZE       4096
+#define IMU_UART_THREAD_PRIORITY         15
+#define IMU_UART_THREAD_TICK             10
+#define IMU_UART_DEV_MAX                 8
+
+static imu_uart_dev_t *g_imu_uart_devs[IMU_UART_DEV_MAX];
+
+static imu_uart_dev_t *imu_uart_find_by_serial(rt_device_t serial)
+{
+    int i;
+
+    for (i = 0; i < IMU_UART_DEV_MAX; i++)
+    {
+        if (g_imu_uart_devs[i] && g_imu_uart_devs[i]->serial == serial)
+        {
+            return g_imu_uart_devs[i];
+        }
+    }
+
+    return RT_NULL;
+}
+
+static int imu_uart_register_dev(imu_uart_dev_t *imu)
+{
+    int i;
+
+    for (i = 0; i < IMU_UART_DEV_MAX; i++)
+    {
+        if (g_imu_uart_devs[i] == RT_NULL)
+        {
+            g_imu_uart_devs[i] = imu;
+            return RT_EOK;
+        }
+    }
+
+    return -RT_EFULL;
+}
+
+static void imu_uart_unregister_dev(imu_uart_dev_t *imu)
+{
+    int i;
+
+    for (i = 0; i < IMU_UART_DEV_MAX; i++)
+    {
+        if (g_imu_uart_devs[i] == imu)
+        {
+            g_imu_uart_devs[i] = RT_NULL;
+            return;
+        }
+    }
+}
+
+static int16_t imu_uart_le_i16(const rt_uint8_t *p)
+{
+    return (int16_t)((rt_uint16_t)p[0] | ((rt_uint16_t)p[1] << 8));
+}
+
+static float imu_uart_le_float(const rt_uint8_t *p)
+{
+    float v;
+    rt_uint8_t raw[4];
+
+    raw[0] = p[0];
+    raw[1] = p[1];
+    raw[2] = p[2];
+    raw[3] = p[3];
+
+    memcpy(&v, raw, sizeof(float));
+    return v;
+}
+
+static rt_uint8_t imu_uart_checksum(const rt_uint8_t *frame, rt_uint8_t len)
+{
+    rt_uint16_t sum = 0;
+    rt_uint8_t i;
+
+    for (i = 0; i < len - 1; i++)
+    {
+        sum += frame[i];
+    }
+
+    return (rt_uint8_t)(sum & 0xFF);
+}
+
+static void imu_uart_parse_frame(imu_uart_dev_t *imu,
+                                 const rt_uint8_t *frame,
+                                 rt_uint8_t len)
+{
+    rt_uint8_t func;
+    const rt_uint8_t *data;
+    rt_uint8_t data_len;
+
+    if (len < 5)
+    {
+        imu->latest.frame_error_count++;
+        return;
+    }
+
+    if (imu_uart_checksum(frame, len) != frame[len - 1])
+    {
+        imu->latest.checksum_error_count++;
+        return;
+    }
+
+    func = frame[3];
+    data = &frame[4];
+    data_len = len - 5; /* remove head0/head1/len/func/checksum */
+
+    if (func == IMU_UART_FUNC_RAW_ACCEL)
+    {
+        int16_t ax_raw;
+        int16_t ay_raw;
+        int16_t az_raw;
+        const float factor = 16.0f / 32767.0f;
+
+        if (data_len < 6)
+        {
+            imu->latest.frame_error_count++;
+            return;
+        }
+
+        ax_raw = imu_uart_le_i16(&data[0]);
+        ay_raw = imu_uart_le_i16(&data[2]);
+        az_raw = imu_uart_le_i16(&data[4]);
+
+        imu->latest.acc_g[0] = (float)ax_raw * factor;
+        imu->latest.acc_g[1] = (float)ay_raw * factor;
+        imu->latest.acc_g[2] = (float)az_raw * factor;
+        imu->latest.acc_update_count++;
+
+        if (imu->callback)
+        {
+            imu->callback(imu, func, &imu->latest);
+        }
+    }
+    else if (func == IMU_UART_FUNC_EULER)
+    {
+        float roll_rad;
+        float pitch_rad;
+        float yaw_rad;
+
+        if (data_len < 12)
+        {
+            imu->latest.frame_error_count++;
+            return;
+        }
+
+        roll_rad  = imu_uart_le_float(&data[0]);
+        pitch_rad = imu_uart_le_float(&data[4]);
+        yaw_rad   = imu_uart_le_float(&data[8]);
+
+        imu->latest.euler_deg[0] = roll_rad  * 57.296f;
+        imu->latest.euler_deg[1] = pitch_rad * 57.296f;
+        imu->latest.euler_deg[2] = yaw_rad   * 57.296f;
+        imu->latest.euler_update_count++;
+
+        if (imu->callback)
+        {
+            imu->callback(imu, func, &imu->latest);
+        }
+    }
+}
+
+static void imu_uart_feed_byte(imu_uart_dev_t *imu, rt_uint8_t ch)
+{
+    switch (imu->parse_state)
+    {
+    case 0:
+        if (ch == IMU_UART_FRAME_HEAD_0)
+        {
+            imu->frame_buf[0] = ch;
+            imu->frame_index = 1;
+            imu->parse_state = 1;
+        }
+        break;
+
+    case 1:
+        if (ch == IMU_UART_FRAME_HEAD_1)
+        {
+            imu->frame_buf[1] = ch;
+            imu->frame_index = 2;
+            imu->parse_state = 2;
+        }
+        else if (ch == IMU_UART_FRAME_HEAD_0)
+        {
+            imu->frame_buf[0] = ch;
+            imu->frame_index = 1;
+            imu->parse_state = 1;
+        }
+        else
+        {
+            imu->parse_state = 0;
+            imu->frame_index = 0;
+        }
+        break;
+
+    case 2:
+        imu->frame_len = ch;
+
+        if (imu->frame_len < 5 || imu->frame_len > IMU_UART_MAX_FRAME_LEN)
+        {
+            imu->latest.frame_error_count++;
+            imu->parse_state = 0;
+            imu->frame_index = 0;
+            imu->frame_len = 0;
+            return;
+        }
+
+        imu->frame_buf[2] = ch;
+        imu->frame_index = 3;
+        imu->parse_state = 3;
+        break;
+
+    case 3:
+        imu->frame_buf[imu->frame_index++] = ch;
+
+        if (imu->frame_index >= imu->frame_len)
+        {
+            imu_uart_parse_frame(imu, imu->frame_buf, imu->frame_len);
+            imu->parse_state = 0;
+            imu->frame_index = 0;
+            imu->frame_len = 0;
+        }
+        break;
+
+    default:
+        imu->parse_state = 0;
+        imu->frame_index = 0;
+        imu->frame_len = 0;
+        break;
+    }
+}
+
+static rt_err_t imu_uart_rx_indicate(rt_device_t dev, rt_size_t size)
+{
+    imu_uart_dev_t *imu = imu_uart_find_by_serial(dev);
+
+    RT_UNUSED(size);
+
+    if (imu)
+    {
+        rt_sem_release(&imu->rx_sem);
+    }
+
+    return RT_EOK;
+}
+
+static void imu_uart_rx_thread_entry(void *parameter)
+{
+    imu_uart_dev_t *imu = (imu_uart_dev_t *)parameter;
+    rt_uint8_t ch;
+
+    while (imu->running)
+    {
+        while (rt_device_read(imu->serial, 0, &ch, 1) == 1)
+        {
+            imu_uart_feed_byte(imu, ch);
+        }
+
+        rt_sem_take(&imu->rx_sem, RT_WAITING_FOREVER);
+    }
+}
+
+int imu_uart_init(imu_uart_dev_t *imu,
+                  const char *uart_name,
+                  rt_uint32_t baudrate,
+                  imu_uart_data_callback_t callback)
+{
+    struct serial_configure config = RT_SERIAL_CONFIG_DEFAULT;
+    char sem_name[RT_NAME_MAX];
+    char thread_name[RT_NAME_MAX];
+
+    if (imu == RT_NULL || uart_name == RT_NULL)
+    {
+        return -RT_EINVAL;
+    }
+
+    memset(imu, 0, sizeof(*imu));
+    rt_strncpy(imu->name, uart_name, RT_NAME_MAX - 1);
+
+    imu->serial = rt_device_find(uart_name);
+    if (imu->serial == RT_NULL)
+    {
+        rt_kprintf("[imu_uart] cannot find device: %s\n", uart_name);
+        return -RT_ERROR;
+    }
+
+    config.baud_rate = baudrate;
+    config.data_bits = DATA_BITS_8;
+    config.stop_bits = STOP_BITS_1;
+    config.parity    = PARITY_NONE;
+    config.bit_order = BIT_ORDER_LSB;
+    config.invert    = NRZ_NORMAL;
+    config.bufsz     = 1024;
+
+    rt_device_control(imu->serial, RT_DEVICE_CTRL_CONFIG, &config);
+
+    rt_snprintf(sem_name, sizeof(sem_name), "%s_rx", uart_name);
+    rt_sem_init(&imu->rx_sem, sem_name, 0, RT_IPC_FLAG_FIFO);
+
+    imu->callback = callback;
+    imu->running = RT_TRUE;
+
+    if (imu_uart_register_dev(imu) != RT_EOK)
+    {
+        rt_kprintf("[imu_uart] device table full\n");
+        rt_sem_detach(&imu->rx_sem);
+        return -RT_EFULL;
+    }
+
+    rt_device_set_rx_indicate(imu->serial, imu_uart_rx_indicate);
+
+    if (rt_device_open(imu->serial, RT_DEVICE_FLAG_INT_RX) != RT_EOK)
+    {
+        rt_kprintf("[imu_uart] open %s failed\n", uart_name);
+        imu_uart_unregister_dev(imu);
+        rt_sem_detach(&imu->rx_sem);
+        return -RT_ERROR;
+    }
+
+    rt_snprintf(thread_name, sizeof(thread_name), "%s_imu", uart_name);
+
+    imu->rx_thread = rt_thread_create(thread_name,
+                                      imu_uart_rx_thread_entry,
+                                      imu,
+                                      IMU_UART_THREAD_STACK_SIZE,
+                                      IMU_UART_THREAD_PRIORITY,
+                                      IMU_UART_THREAD_TICK);
+    if (imu->rx_thread == RT_NULL)
+    {
+        rt_kprintf("[imu_uart] create rx thread failed\n");
+        rt_device_close(imu->serial);
+        imu_uart_unregister_dev(imu);
+        rt_sem_detach(&imu->rx_sem);
+        return -RT_ERROR;
+    }
+
+    rt_thread_startup(imu->rx_thread);
+
+    rt_kprintf("[imu_uart] %s started, baud=%d\n", uart_name, baudrate);
+    return RT_EOK;
+}
+
+int imu_uart_deinit(imu_uart_dev_t *imu)
+{
+    if (imu == RT_NULL)
+    {
+        return -RT_EINVAL;
+    }
+
+    imu->running = RT_FALSE;
+    rt_sem_release(&imu->rx_sem);
+
+    if (imu->serial)
+    {
+        rt_device_close(imu->serial);
+    }
+
+    imu_uart_unregister_dev(imu);
+    rt_sem_detach(&imu->rx_sem);
+
+    return RT_EOK;
+}
+
+const imu_uart_data_t *imu_uart_get_latest(imu_uart_dev_t *imu)
+{
+    if (imu == RT_NULL)
+    {
+        return RT_NULL;
+    }
+
+    return &imu->latest;
+}

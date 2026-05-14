@@ -1,0 +1,32 @@
+#include <rtthread.h>
+#include "drv_imu_uart.h"
+
+static imu_uart_dev_t imu1;
+
+static void imu_data_callback(imu_uart_dev_t *imu,
+                              rt_uint8_t func,
+                              const imu_uart_data_t *data)
+{
+    RT_UNUSED(imu);
+
+    if (func == IMU_UART_FUNC_RAW_ACCEL)
+    {
+        rt_kprintf("ACC[g]: %.3f %.3f %.3f\n",
+                   data->acc_g[0],
+                   data->acc_g[1],
+                   data->acc_g[2]);
+    }
+    else if (func == IMU_UART_FUNC_EULER)
+    {
+        rt_kprintf("EULER[deg]: %.3f %.3f %.3f\n",
+                   data->euler_deg[0],
+                   data->euler_deg[1],
+                   data->euler_deg[2]);
+    }
+}
+
+int imu_test_init(void)
+{
+    return imu_uart_init(&imu1, "uart3", 115200, imu_data_callback);
+}
+MSH_CMD_EXPORT(imu_test_init, start imu uart parser);
