@@ -1,24 +1,226 @@
-/*
- * Copyright (c) 2006-2026, RT-Thread Development Team
- *
- * SPDX-License-Identifier: Apache-2.0
- *
- * Change Logs:
- * Date           Author       Notes
- * 2026-05-04     RT-Thread    first version
- */
-
 #include <rtthread.h>
+#include <rtdevice.h>
+#include <board.h>
+#include "drv_spi.h"
+/*
+ * AD7606 current wiring:
+ *
+ * SPI:
+ *   PA5 -> AD7606 RD/SCLK
+ *   PA6 -> AD7606 D7/DOUTA
+ *   PA0 -> AD7606 CS
+ *
+ * Control:
+ *   PB0 -> AD7606 CA / CONVST_A
+ *   PB1 -> AD7606 BUSY
+ *   PB2 -> AD7606 RST
+ *
+ * Current stage:
+ *   1. Test AD7606 GPIO control
+ *   2. Only find spi1
+ *   3. Do NOT attach SPI device
+ *   4. Do NOT configure SPI
+ *   5. Do NOT transfer SPI data
+ */
+static struct rt_spi_configuration ad7606_spi_cfg;
+#define AD7606_CONVST_PIN    GET_PIN(B, 0)
+#define AD7606_BUSY_PIN      GET_PIN(B, 1)
+#define AD7606_RESET_PIN     GET_PIN(B, 2)
 
-#define DBG_TAG "main"
+static void delay_us_soft(volatile int us)
+{
+    while (us--)
+    {
+        for (volatile int i = 0; i < 200; i++)
+        {
+            __NOP();
+        }
+    }
+}
 
+static void ad7606_gpio_init(void)
+{
+    rt_pin_mode(AD7606_CONVST_PIN, PIN_MODE_OUTPUT);
+    rt_pin_mode(AD7606_RESET_PIN, PIN_MODE_OUTPUT);
+    rt_pin_mode(AD7606_BUSY_PIN, PIN_MODE_INPUT);
 
-#include <rtdbg.h>
-#include<rtdevice.h>
-#include<board.h>
+    rt_pin_write(AD7606_CONVST_PIN, PIN_LOW);
+    rt_pin_write(AD7606_RESET_PIN, PIN_LOW);
+
+    rt_kprintf("ad7606 gpio init done\r\n");
+}
+
+static void spi_find_test(void)
+{
+    rt_device_t spi_dev;
+
+    rt_kprintf("before find spi1\r\n");
+
+    spi_dev = rt_device_find("spi1");
+
+    if (spi_dev == RT_NULL)
+    {
+        rt_kprintf("spi1 not found\r\n");
+    }
+    else
+    {
+        rt_kprintf("spi1 found\r\n");
+    }
+
+    rt_kprintf("after find spi1\r\n");
+}
+static void spi_attach_test(void)
+{
+    rt_err_t ret;
+    rt_device_t dev;
+
+    rt_kprintf("before attach ad7606\r\n");
+
+    /*
+     * PA0 is used as software CS.
+     * Make sure GPIOA clock is enabled before HAL_GPIO_Init in attach.
+     */
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+
+    /*
+     * Important:
+     * RT_NAME_MAX = 8, so object name must be <= 7 chars.
+     * "ad7606" is safe.
+     */
+    ret = rt_hw_spi_device_attach("spi1",
+                                  "ad7606",
+                                  GPIOA,
+                                  GPIO_PIN_0);
+
+    rt_kprintf("after attach ad7606, ret = %d\r\n", ret);
+
+    if (ret != RT_EOK)
+    {
+        rt_kprintf("attach ad7606 failed\r\n");
+        return;
+    }
+
+    dev = rt_device_find("ad7606");
+
+    if (dev == RT_NULL)
+    {
+        rt_kprintf("ad7606 device not found\r\n");
+    }
+    else
+    {
+        rt_kprintf("ad7606 device found\r\n");
+    }
+
+    rt_kprintf("spi attach test done\r\n");
+}
+static void spi_config_test(void)
+{
+    rt_err_t ret;
+    struct rt_spi_device *spi_dev;
+
+    rt_kprintf("before find ad7606 for configure\r\n");
+
+    spi_dev = (struct rt_spi_device *)rt_device_find("ad7606");
+
+    if (spi_dev == RT_NULL)
+    {
+        rt_kprintf("ad7606 not found before configure\r\n");
+        return;
+    }
+
+    rt_kprintf("ad7606 found before configure\r\n");
+
+    rt_memset(&ad7606_spi_cfg, 0, sizeof(ad7606_spi_cfg));
+
+    ad7606_spi_cfg.data_width = 8;
+    ad7606_spi_cfg.mode = RT_SPI_MASTER | RT_SPI_MODE_0 | RT_SPI_MSB;
+    ad7606_spi_cfg.max_hz = 1000 * 1000;
+
+    rt_kprintf("before rt_spi_configure\r\n");
+
+    ret = rt_spi_configure(spi_dev, &ad7606_spi_cfg);
+
+    rt_kprintf("after rt_spi_configure, ret = %d\r\n", ret);
+
+    if (ret != RT_EOK)
+    {
+        rt_kprintf("configure ad7606 failed\r\n");
+        return;
+    }
+
+    rt_kprintf("spi configure test done\r\n");
+}
+
+static void ad7606_reset_test(void)
+{
+    rt_kprintf("reset pulse start\r\n");
+
+    rt_pin_write(AD7606_RESET_PIN, PIN_LOW);
+    rt_thread_mdelay(1);
+
+    rt_pin_write(AD7606_RESET_PIN, PIN_HIGH);
+    rt_thread_mdelay(1);
+
+    rt_pin_write(AD7606_RESET_PIN, PIN_LOW);
+    rt_thread_mdelay(1);
+
+    rt_kprintf("reset pulse done\r\n");
+}
+
+static void ad7606_convst_test(void)
+{
+    int busy_before;
+
+    busy_before = rt_pin_read(AD7606_BUSY_PIN);
+
+    rt_kprintf("BUSY before CONVST = %d\r\n", busy_before);
+
+    rt_pin_write(AD7606_CONVST_PIN, PIN_LOW);
+    delay_us_soft(5);
+
+    rt_pin_write(AD7606_CONVST_PIN, PIN_HIGH);
+    delay_us_soft(5);
+
+    rt_pin_write(AD7606_CONVST_PIN, PIN_LOW);
+
+    rt_kprintf("CONVST pulse done\r\n");
+
+    /*
+     * 不死等 BUSY，只采样几次。
+     * BUSY 高电平可能只有几微秒，所以这里一直读到 0 不一定是错。
+     */
+    for (int i = 0; i < 10; i++)
+    {
+        rt_kprintf("BUSY sample %d = %d\r\n",
+                   i,
+                   rt_pin_read(AD7606_BUSY_PIN));
+
+        rt_thread_mdelay(10);
+    }
+}
 
 int main(void)
 {
-    rt_kprintf("System start.\n");
-        return 0;
+    rt_kprintf("main start\r\n");
+
+    rt_thread_mdelay(500);
+
+    ad7606_gpio_init();
+
+    spi_find_test();
+
+    spi_attach_test();
+
+    spi_config_test();
+
+    while (1)
+    {
+        ad7606_reset_test();
+        rt_thread_mdelay(500);
+
+        ad7606_convst_test();
+        rt_thread_mdelay(1000);
+
+        rt_kprintf("alive\r\n");
+    }
 }
