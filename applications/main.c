@@ -23,6 +23,7 @@
  *   5. Do NOT transfer SPI data
  */
 static struct rt_spi_configuration ad7606_spi_cfg;
+static struct rt_spi_device *ad7606_spi_dev = RT_NULL;
 #define AD7606_CONVST_PIN    GET_PIN(B, 0)
 #define AD7606_BUSY_PIN      GET_PIN(B, 1)
 #define AD7606_RESET_PIN     GET_PIN(B, 2)
@@ -148,6 +149,8 @@ static void spi_config_test(void)
         return;
     }
 
+    ad7606_spi_dev = spi_dev;
+
     rt_kprintf("spi configure test done\r\n");
 }
 
@@ -198,7 +201,86 @@ static void ad7606_convst_test(void)
         rt_thread_mdelay(10);
     }
 }
+static void ad7606_spi_read_test(void)
+{
+    uint8_t tx_buf[16];
+    uint8_t rx_buf[16];
+    rt_size_t ret;
 
+    if (ad7606_spi_dev == RT_NULL)
+    {
+        rt_kprintf("ad7606 spi dev is NULL\r\n");
+        return;
+    }
+
+    rt_memset(tx_buf, 0xFF, sizeof(tx_buf));
+    rt_memset(rx_buf, 0x00, sizeof(rx_buf));
+
+    rt_kprintf("before spi transfer\r\n");
+
+    /*
+     * Single DOUTA read:
+     * AD7606 has 8 channels.
+     * 8 channels * 16 bits = 128 bits = 16 bytes.
+     *
+     * Current wiring:
+     *   PA5 -> RD/SCLK
+     *   PA6 -> D7/DOUTA
+     *   PA0 -> CS
+     */
+    ret = rt_spi_transfer(ad7606_spi_dev,
+                          tx_buf,
+                          rx_buf,
+                          sizeof(rx_buf));
+
+    rt_kprintf("after spi transfer, ret = %d\r\n", ret);
+
+    if (ret != sizeof(rx_buf))
+    {
+        rt_kprintf("spi transfer length error\r\n");
+        return;
+    }
+
+    rt_kprintf("RX bytes: ");
+    for (int i = 0; i < 16; i++)
+    {
+        rt_kprintf("%02X ", rx_buf[i]);
+    }
+    rt_kprintf("\r\n");
+
+    for (int ch = 0; ch < 6; ch++)
+    {
+        int16_t raw;
+        int mv;
+        int negative = 0;
+
+        raw = (int16_t)(((uint16_t)rx_buf[ch * 2] << 8) |
+                         rx_buf[ch * 2 + 1]);
+
+        /*
+         * Current assumption:
+         * RANGE = high, so input range is +/-10V.
+         *
+         * voltage_mV = raw * 10000 / 32768
+         */
+        mv = ((int)raw) * 10000 / 32768;
+
+        if (mv < 0)
+        {
+            negative = 1;
+            mv = -mv;
+        }
+
+        rt_kprintf("CH%d raw = %6d, voltage = %s%d.%03d V\r\n",
+                   ch + 1,
+                   raw,
+                   negative ? "-" : "",
+                   mv / 1000,
+                   mv % 1000);
+    }
+
+    rt_kprintf("-------------------------\r\n");
+}
 int main(void)
 {
     rt_kprintf("main start\r\n");
@@ -213,12 +295,16 @@ int main(void)
 
     spi_config_test();
 
+    ad7606_reset_test();
+
+    rt_kprintf("init all done\r\n");
+
     while (1)
     {
-        ad7606_reset_test();
-        rt_thread_mdelay(500);
-
         ad7606_convst_test();
+
+        ad7606_spi_read_test();
+
         rt_thread_mdelay(1000);
 
         rt_kprintf("alive\r\n");
