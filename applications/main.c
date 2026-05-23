@@ -283,30 +283,8 @@ static void ad7606_spi_read_test(void)
 }
 int main(void)
 {
-    rt_kprintf("main start\r\n");
+    rt_kprintf("main start\n");
+    rt_kprintf("ad7606 disabled, clock debug mode\n");
 
-    rt_thread_mdelay(500);
-
-    ad7606_gpio_init();
-
-    spi_find_test();
-
-    spi_attach_test();
-
-    spi_config_test();
-
-    ad7606_reset_test();
-
-    rt_kprintf("init all done\r\n");
-
-    while (1)
-    {
-        ad7606_convst_test();
-
-        ad7606_spi_read_test();
-
-        rt_thread_mdelay(1000);
-
-        rt_kprintf("alive\r\n");
-    }
+    return 0;
 }

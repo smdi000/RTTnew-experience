@@ -11,6 +11,7 @@
 #include <rtthread.h>
 #include <board.h>
 #include <drv_common.h>
+#include "stm32h7xx_hal.h"
 
 #ifndef RT_WEAK
 #define RT_WEAK rt_weak
@@ -64,3 +65,14 @@ void HAL_SPI_MspInit(SPI_HandleTypeDef* hspi)
         HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
     }
 }
+
+static int clk_test(void)
+{
+    rt_kprintf("SYSCLK = %lu Hz\n", HAL_RCC_GetSysClockFreq());
+    rt_kprintf("HCLK   = %lu Hz\n", HAL_RCC_GetHCLKFreq());
+    rt_kprintf("PCLK1  = %lu Hz\n", HAL_RCC_GetPCLK1Freq());
+    rt_kprintf("PCLK2  = %lu Hz\n", HAL_RCC_GetPCLK2Freq());
+
+    return 0;
+}
+MSH_CMD_EXPORT(clk_test, print stm32 clock tree);
