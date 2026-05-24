@@ -90,7 +90,7 @@
 
 #define GO_TX_LEN               17
 #define GO_RX_LEN               16
-
+static int g_verbose = 1;
 static rt_device_t go_uart = RT_NULL;
 
 /* ---------- Basic utilities ---------- */
@@ -344,14 +344,75 @@ static void build_zero_cmd(uint8_t id, uint8_t mode, uint8_t tx[GO_TX_LEN])
     crc = crc_ccitt(0, tx, 15);
     put_u16_le(&tx[15], crc);
 }
-
-static int go_send_recv(uint8_t id,
-                        uint8_t mode,
-                        uint8_t *rx,
-                        int rx_size,
-                        int timeout_us)
+static void put_i16_le(uint8_t *p, int16_t v)
 {
-    uint8_t tx[GO_TX_LEN];
+    p[0] = (uint8_t)((uint16_t)v & 0xFF);
+    p[1] = (uint8_t)(((uint16_t)v >> 8) & 0xFF);
+}
+
+static void put_i32_le(uint8_t *p, int32_t v)
+{
+    p[0] = (uint8_t)((uint32_t)v & 0xFF);
+    p[1] = (uint8_t)(((uint32_t)v >> 8) & 0xFF);
+    p[2] = (uint8_t)(((uint32_t)v >> 16) & 0xFF);
+    p[3] = (uint8_t)(((uint32_t)v >> 24) & 0xFF);
+}
+
+/*
+ * Build raw command:
+ * tx[0..1]  = FE EE
+ * tx[2]     = id + mode
+ * tx[3..4]  = tor_des
+ * tx[5..6]  = spd_des
+ * tx[7..10] = pos_des
+ * tx[11..12]= k_pos
+ * tx[13..14]= k_spd
+ * tx[15..16]= CRC16
+ */
+static void build_raw_cmd(uint8_t id,
+                          uint8_t mode,
+                          int16_t tor_raw,
+                          int16_t spd_raw,
+                          int32_t pos_raw,
+                          int16_t kp_raw,
+                          int16_t kd_raw,
+                          uint8_t tx[GO_TX_LEN])
+{
+    uint16_t crc;
+
+    rt_memset(tx, 0, GO_TX_LEN);
+
+    tx[0] = 0xFE;
+    tx[1] = 0xEE;
+    tx[2] = (uint8_t)((id & 0x0F) | ((mode & 0x07) << 4));
+
+    put_i16_le(&tx[3],  tor_raw);
+    put_i16_le(&tx[5],  spd_raw);
+    put_i32_le(&tx[7],  pos_raw);
+    put_i16_le(&tx[11], kp_raw);
+    put_i16_le(&tx[13], kd_raw);
+
+    crc = crc_ccitt(0, tx, 15);
+    put_u16_le(&tx[15], crc);
+}
+
+static int feedback_crc_ok(const uint8_t rx[GO_RX_LEN])
+{
+    uint16_t crc_recv;
+    uint16_t crc_calc;
+
+    crc_recv = (uint16_t)rx[14] | ((uint16_t)rx[15] << 8);
+    crc_calc = crc_ccitt(0, rx, 14);
+
+    return crc_recv == crc_calc;
+}
+
+static int go_send_prebuilt(const uint8_t tx[GO_TX_LEN],
+                            uint8_t *rx,
+                            int rx_size,
+                            int timeout_us,
+                            int verbose)
+{
     int n;
     int rx_len;
 
@@ -360,14 +421,12 @@ static int go_send_recv(uint8_t id,
         return -1;
     }
 
-    build_zero_cmd(id, mode, tx);
+    if (verbose)
+    {
+        rt_kprintf("send raw frame:\r\n");
+        dump_hex(tx, GO_TX_LEN);
+    }
 
-    rt_kprintf("send %d bytes, id=%d mode=%d:\r\n", GO_TX_LEN, id, mode);
-    dump_hex(tx, GO_TX_LEN);
-
-    /*
-     * Raw register path.
-     */
     uart2_raw_clear_rx();
 
     rs485_tx_mode();
@@ -380,29 +439,36 @@ static int go_send_recv(uint8_t id,
         return -1;
     }
 
-    /*
-     * Official logic equivalent:
-     * HAL_UART_Transmit finished -> switch to receive immediately.
-     */
     rs485_rx_mode();
 
-    /*
-     * Motor feedback:
-     *   16 bytes @ 4Mbps 8N1 ~= 40us.
-     * Give a wider polling window.
-     */
     rx_len = uart2_raw_read(rx, rx_size, timeout_us);
 
-    rt_kprintf("rx_len=%d\r\n", rx_len);
-
-    if (rx_len > 0)
+    if (verbose)
     {
-        dump_hex(rx, rx_len);
+        rt_kprintf("rx_len=%d\r\n", rx_len);
+        if (rx_len > 0)
+        {
+            dump_hex(rx, rx_len);
+        }
     }
 
     return rx_len;
 }
-
+/*
+ * Usage:
+ *   go_nudge
+ *   go_nudge 1 1 20 20
+ *   go_nudge 1 -1 20 20
+ *
+ * Args:
+ *   argv[1] = id, default 1
+ *   argv[2] = dir, +1 or -1, default +1
+ *   argv[3] = torque_raw, default 20
+ *             actual torque command = torque_raw / 256 Nm
+ *             20 -> about 0.078 Nm
+ *   argv[4] = pulse_count, default 20
+ *             each pulse interval approx 1ms
+ */
 static void parse_feedback(const uint8_t rx[GO_RX_LEN])
 {
     uint16_t crc_recv;
@@ -440,6 +506,208 @@ static void parse_feedback(const uint8_t rx[GO_RX_LEN])
                crc_calc,
                (crc_recv == crc_calc) ? "OK" : "BAD");
 }
+static int go_nudge(int argc, char **argv)
+{
+    uint8_t tx[GO_TX_LEN];
+    uint8_t rx[32];
+
+    uint8_t id = 1;
+    int dir = 1;
+    int torque_raw_abs = 20;
+    int pulse_count = 20;
+
+    int tor_raw;
+    int i;
+
+    int ok = 0;
+    int len_err = 0;
+    int crc_err = 0;
+
+    if (argc >= 2)
+    {
+        id = (uint8_t)atoi(argv[1]);
+    }
+
+    if (argc >= 3)
+    {
+        dir = atoi(argv[2]);
+    }
+
+    if (argc >= 4)
+    {
+        torque_raw_abs = atoi(argv[3]);
+    }
+
+    if (argc >= 5)
+    {
+        pulse_count = atoi(argv[4]);
+    }
+
+    if (id > 14)
+    {
+        rt_kprintf("invalid id, use 0~14\r\n");
+        return -1;
+    }
+
+    if (dir >= 0)
+    {
+        dir = 1;
+    }
+    else
+    {
+        dir = -1;
+    }
+
+    /*
+     * Tonight safety limit.
+     * 80 / 256 = 0.3125 Nm command.
+     */
+    if (torque_raw_abs < 1)
+    {
+        torque_raw_abs = 1;
+    }
+
+    if (torque_raw_abs > 80)
+    {
+        rt_kprintf("torque_raw too large for first test, limit to 80\r\n");
+        torque_raw_abs = 80;
+    }
+
+    if (pulse_count < 1)
+    {
+        pulse_count = 1;
+    }
+
+    if (pulse_count > 100)
+    {
+        pulse_count = 100;
+    }
+
+    tor_raw = dir * torque_raw_abs;
+
+    rt_kprintf("go_nudge: id=%d dir=%d torque_raw=%d pulse_count=%d\r\n",
+               id, dir, tor_raw, pulse_count);
+    rt_kprintf("actual torque command approx %.4f Nm\r\n",
+               (float)tor_raw / 256.0f);
+
+    /*
+     * 1. Tiny torque pulse.
+     * mode=1, Kp=0, Kd=0, speed=0, position=0.
+     */
+    build_raw_cmd(id, 1, (int16_t)tor_raw, 0, 0, 0, 0, tx);
+
+    for (i = 0; i < pulse_count; i++)
+    {
+        int rx_len;
+
+        rt_memset(rx, 0, sizeof(rx));
+
+        rx_len = go_send_prebuilt(tx, rx, GO_RX_LEN, 500, 0);
+
+        if (rx_len != GO_RX_LEN)
+        {
+            len_err++;
+        }
+        else if (!feedback_crc_ok(rx))
+        {
+            crc_err++;
+        }
+        else
+        {
+            ok++;
+        }
+
+        rt_hw_us_delay(1000);
+    }
+
+    /*
+     * 2. Immediately send zero torque several times.
+     */
+    build_zero_cmd(id, 1, tx);
+
+    for (i = 0; i < 50; i++)
+    {
+        go_send_prebuilt(tx, rx, GO_RX_LEN, 500, 0);
+        rt_hw_us_delay(1000);
+    }
+
+    rt_kprintf("go_nudge done:\r\n");
+    rt_kprintf("  pulse_ok=%d\r\n", ok);
+    rt_kprintf("  len_err=%d\r\n", len_err);
+    rt_kprintf("  crc_err=%d\r\n", crc_err);
+
+    rt_kprintf("last feedback:\r\n");
+    dump_hex(rx, GO_RX_LEN);
+    parse_feedback(rx);
+
+    return 0;
+}
+MSH_CMD_EXPORT(go_nudge, go_nudge);
+static int go_send_recv(uint8_t id,
+                        uint8_t mode,
+                        uint8_t *rx,
+                        int rx_size,
+                        int timeout_us)
+{
+    uint8_t tx[GO_TX_LEN];
+    int n;
+    int rx_len;
+
+    if (go_uart_init() != 0)
+    {
+        return -1;
+    }
+
+    build_zero_cmd(id, mode, tx);
+
+    if (g_verbose)
+    {
+        rt_kprintf("send %d bytes, id=%d mode=%d:\r\n", GO_TX_LEN, id, mode);
+        dump_hex(tx, GO_TX_LEN);
+    }
+
+    /*
+     * Raw register path.
+     */
+    uart2_raw_clear_rx();
+
+    rs485_tx_mode();
+
+    n = uart2_raw_write(tx, GO_TX_LEN);
+    if (n != GO_TX_LEN)
+    {
+        rt_kprintf("raw write failed, n=%d\r\n", n);
+        rs485_rx_mode();
+        return -1;
+    }
+
+    /*
+     * Official logic equivalent:
+     * HAL_UART_Transmit finished -> switch to receive immediately.
+     */
+    rs485_rx_mode();
+
+    /*
+     * Motor feedback:
+     *   16 bytes @ 4Mbps 8N1 ~= 40us.
+     * Give a wider polling window.
+     */
+    rx_len = uart2_raw_read(rx, rx_size, timeout_us);
+
+    if (g_verbose)
+    {
+        rt_kprintf("rx_len=%d\r\n", rx_len);
+
+        if (rx_len > 0)
+        {
+            dump_hex(rx, rx_len);
+        }
+    }
+
+    return rx_len;
+}
+
+
 
 /* ---------- MSH command ---------- */
 
@@ -463,8 +731,13 @@ static int go_ping(int argc, char **argv)
     uint8_t rx[32];
     uint8_t id = 1;
     uint8_t mode = 1;
-    int timeout_us = 500;
-    int rx_len;
+    int count = 1;
+    int i;
+
+    int ok_count = 0;
+    int len_err_count = 0;
+    int header_err_count = 0;
+    int crc_err_count = 0;
 
     if (argc >= 2)
     {
@@ -478,7 +751,7 @@ static int go_ping(int argc, char **argv)
 
     if (argc >= 4)
     {
-        timeout_us = atoi(argv[3]);
+        count = atoi(argv[3]);
     }
 
     if (id > 15)
@@ -493,34 +766,75 @@ static int go_ping(int argc, char **argv)
         return -1;
     }
 
-    if (timeout_us < 50 || timeout_us > 5000)
+    if (count < 1 || count > 10000)
     {
-        rt_kprintf("invalid timeout_us, suggest 500~1000\r\n");
-        return -1;
-    }
-
-    rx_len = go_send_recv(id, mode, rx, GO_RX_LEN, timeout_us);
-
-    if (rx_len != GO_RX_LEN)
-    {
-        rt_kprintf("no full 16-byte response\r\n");
+        rt_kprintf("invalid count, use 1~10000\r\n");
         return -1;
     }
 
     /*
-     * Real test showed GO-M8010 feedback header can be FD EE.
-     * Some official sample code checks FE EE.
-     * Accept both while debugging.
+     * Single test: print full frame.
+     * Multi test: quiet mode, only print statistics.
      */
-    if (!((rx[0] == 0xFD && rx[1] == 0xEE) ||
-          (rx[0] == 0xFE && rx[1] == 0xEE)))
+    g_verbose = (count == 1) ? 1 : 0;
+
+    for (i = 0; i < count; i++)
     {
-        rt_kprintf("unexpected feedback header\r\n");
-        return -1;
+        int rx_len;
+        uint16_t crc_recv;
+        uint16_t crc_calc;
+
+        rt_memset(rx, 0, sizeof(rx));
+
+        rx_len = go_send_recv(id, mode, rx, GO_RX_LEN, 500);
+        /*
+         * Avoid hammering the RS485 bus continuously during stress test.
+         * 200us is still far faster than 40Hz control.
+         */
+        if (count > 1)
+        {
+            rt_hw_us_delay(200);
+        }
+        if (rx_len != GO_RX_LEN)
+        {
+            len_err_count++;
+            continue;
+        }
+
+        if (!((rx[0] == 0xFD && rx[1] == 0xEE) ||
+              (rx[0] == 0xFE && rx[1] == 0xEE)))
+        {
+            header_err_count++;
+            continue;
+        }
+
+        crc_recv = (uint16_t)rx[14] | ((uint16_t)rx[15] << 8);
+        crc_calc = crc_ccitt(0, rx, 14);
+
+        if (crc_recv != crc_calc)
+        {
+            crc_err_count++;
+            continue;
+        }
+
+        ok_count++;
     }
 
-    parse_feedback(rx);
+    g_verbose = 1;
 
-    return 0;
+    rt_kprintf("go_ping stress result:\r\n");
+    rt_kprintf("  id=%d mode=%d count=%d\r\n", id, mode, count);
+    rt_kprintf("  ok=%d\r\n", ok_count);
+    rt_kprintf("  len_err=%d\r\n", len_err_count);
+    rt_kprintf("  header_err=%d\r\n", header_err_count);
+    rt_kprintf("  crc_err=%d\r\n", crc_err_count);
+
+    if (count == 1 && ok_count == 1)
+    {
+        parse_feedback(rx);
+    }
+
+    return (ok_count == count) ? 0 : -1;
 }
 MSH_CMD_EXPORT(go_ping, go_ping);
+
