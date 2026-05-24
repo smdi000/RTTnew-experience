@@ -65,4 +65,5 @@ int imu_show(void)
 
     return 0;
 }
+
 MSH_CMD_EXPORT(imu_show, show latest imu data);

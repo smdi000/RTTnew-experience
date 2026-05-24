@@ -18,7 +18,7 @@
  * Current stage:
  *   1. Test AD7606 GPIO control
  *   2. Only find spi1
- *   3. Do NOT attach SPI device
+ *   3. Do NOT attach SPI device下载
  *   4. Do NOT configure SPI
  *   5. Do NOT transfer SPI data
  */
