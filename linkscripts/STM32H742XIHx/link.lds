@@ -1,5 +1,5 @@
 /*
- * linker script for STM32H743IITx with GNU ld
+ * linker script for STM32H742XIHx with GNU ld
  */
 
 /* Program Entry, set to mark it as "used" and avoid gc */

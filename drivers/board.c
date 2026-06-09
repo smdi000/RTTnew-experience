@@ -75,4 +75,4 @@ static int clk_test(void)
 
     return 0;
 }
-MSH_CMD_EXPORT(clk_test, print stm32 clock tree);
+//MSH_CMD_EXPORT(clk_test, print stm32 clock tree);

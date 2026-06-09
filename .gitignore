@@ -35,11 +35,3 @@ DebugConfig/
 RTE/
 settings/
 *.uvguix*
-build/
-bin/
-*.elf
-*.map
-.config
-.sconsign.dblite
-*.o
-*.d

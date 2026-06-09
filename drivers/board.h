@@ -5,7 +5,7 @@
  *
  * Change Logs:
  * Date           Author       Notes
- * 2026-05-04     RealThread   first version
+ * 2026-06-04     RealThread   first version
  */
 
 #ifndef __BOARD_H__
@@ -23,7 +23,7 @@ extern "C"
 
 #define CHIP_FAMILY_STM32
 #define CHIP_SERIES_STM32H7
-#define CHIP_NAME_STM32H743IITX
+#define CHIP_NAME_STM32H743XIHX
 
 /*-------------------------- CHIP CONFIG END --------------------------*/
 
@@ -78,6 +78,23 @@ extern "C"
 #define BSP_UART3_TX_PIN       "PB10"
 #define BSP_UART3_RX_PIN       "PB11"
 
+#define BSP_USING_UART4
+#define BSP_UART4_TX_PIN       "PC10"
+#define BSP_UART4_RX_PIN       "PC11"
+
+#define BSP_USING_UART5
+#define BSP_UART5_TX_PIN       "PB13"
+#define BSP_UART5_RX_PIN       "PB12"
+
+#define BSP_USING_UART6
+#define BSP_UART6_TX_PIN       "PG14"
+#define BSP_UART6_RX_PIN       "PG9"
+
+/* 先不用 UART7 */
+// #define BSP_USING_UART7
+// #define BSP_UART7_TX_PIN       "PE8"
+// #define BSP_UART7_RX_PIN       "PE7"
+
 /*-------------------------- UART CONFIG END --------------------------*/
 
 /*-------------------------- I2C CONFIG BEGIN --------------------------*/
@@ -125,10 +142,11 @@ extern "C"
  */
 
 #define BSP_USING_SPI1
+#define BSP_SPI1_SCK_PIN       "PA5"
+#define BSP_SPI1_MISO_PIN      "PA6"
+#define BSP_SPI1_MOSI_PIN      "PA7"
 /*#define BSP_USING_SPI2*/
 /*#define BSP_USING_SPI3*/
-
-
 
 /*-------------------------- SPI CONFIG END --------------------------*/
 
@@ -377,8 +395,5 @@ extern "C"
 #ifdef __cplusplus
 }
 #endif
-
-//SPI1初始化
-
 
 #endif /* __BOARD_H__ */

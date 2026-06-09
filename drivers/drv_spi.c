@@ -106,8 +106,7 @@ static rt_err_t stm32_spi_init(struct stm32_spi *spi_drv, struct rt_spi_configur
     if (cfg->data_width == 8)
     {
         spi_handle->Init.DataSize = SPI_DATASIZE_8BIT;
-        spi_handle->TxXferSize = 8;
-        spi_handle->RxXferSize = 8;
+
     }
     else if (cfg->data_width == 16)
     {
@@ -258,7 +257,7 @@ static rt_err_t stm32_spi_init(struct stm32_spi *spi_drv, struct rt_spi_configur
         HAL_NVIC_EnableIRQ(spi_drv->config->dma_tx->dma_irq);
     }
 
-    __HAL_SPI_ENABLE(spi_handle);
+   // __HAL_SPI_ENABLE(spi_handle);
 
     LOG_D("%s init done", spi_drv->config->bus_name);
     return RT_EOK;
@@ -313,7 +312,7 @@ static rt_uint32_t spixfer(struct rt_spi_device *device, struct rt_spi_message *
         already_send_length = message->length - send_length - message_length;
         send_buf = (rt_uint8_t *)message->send_buf + already_send_length;
         recv_buf = (rt_uint8_t *)message->recv_buf + already_send_length;
-
+        
         /* start once data exchange in DMA mode */
         if (message->send_buf && message->recv_buf)
         {
@@ -352,7 +351,22 @@ static rt_uint32_t spixfer(struct rt_spi_device *device, struct rt_spi_message *
 
         if (state != HAL_OK)
         {
-            LOG_I("spi transfer error : %d", state);
+            rt_kprintf("spi transfer error: state=%d, hal_err=0x%08lx\r\n",
+                          state,
+                          HAL_SPI_GetError(spi_handle));
+
+           #if defined(SOC_SERIES_STM32H7)
+               rt_kprintf("SPI regs: CR1=0x%08lx CFG1=0x%08lx CFG2=0x%08lx SR=0x%08lx\r\n",
+                          spi_handle->Instance->CR1,
+                          spi_handle->Instance->CFG1,
+                          spi_handle->Instance->CFG2,
+                          spi_handle->Instance->SR);
+           #else
+               rt_kprintf("SPI regs: CR1=0x%08lx CR2=0x%08lx SR=0x%08lx\r\n",
+                          spi_handle->Instance->CR1,
+                          spi_handle->Instance->CR2,
+                          spi_handle->Instance->SR);
+           #endif
             message->length = 0;
             spi_handle->State = HAL_SPI_STATE_READY;
         }
@@ -364,7 +378,7 @@ static rt_uint32_t spixfer(struct rt_spi_device *device, struct rt_spi_message *
         /* For simplicity reasons, this example is just waiting till the end of the
            transfer, but application may perform other tasks while transfer operation
            is ongoing. */
-        while (HAL_SPI_GetState(spi_handle) != HAL_SPI_STATE_READY);
+        //while (HAL_SPI_GetState(spi_handle) != HAL_SPI_STATE_READY);
     }
 
     if (message->cs_release)
@@ -880,23 +894,23 @@ static void stm32_get_dma_info(void)
 }
 
 #if defined(SOC_SERIES_STM32F0)
-void SPI1_DMA_RX_TX_IRQHandler(void)
+void SPI1_DMA_RX_TX_IRQHandler(void) 
 {
 #if defined(BSP_USING_SPI1) && defined(BSP_SPI1_TX_USING_DMA)
     SPI1_DMA_TX_IRQHandler();
 #endif
-
+    
 #if defined(BSP_USING_SPI1) && defined(BSP_SPI1_RX_USING_DMA)
     SPI1_DMA_RX_IRQHandler();
 #endif
 }
 
-void SPI2_DMA_RX_TX_IRQHandler(void)
+void SPI2_DMA_RX_TX_IRQHandler(void) 
 {
 #if defined(BSP_USING_SPI2) && defined(BSP_SPI2_TX_USING_DMA)
     SPI2_DMA_TX_IRQHandler();
 #endif
-
+    
 #if defined(BSP_USING_SPI2) && defined(BSP_SPI2_RX_USING_DMA)
     SPI2_DMA_RX_IRQHandler();
 #endif
