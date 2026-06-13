@@ -1,3 +1,4 @@
+#include <applications/ad7606_app.h>
 /*
  * Copyright (c) 2006-2021, RT-Thread Development Team
  *
@@ -12,7 +13,6 @@
 #include <board.h>
 #include <string.h>
 #include "drv_spi.h"
-#include "ad7606_app.h"
 
 /*
  * AD7606 wiring:
